@@ -1,0 +1,20 @@
+on:
+  push:
+    branches: [main]
+    
+jobs:
+  print-messages:
+    runs-on: ubuntu-latest
+    steps:
+    - name: "echo"
+      run: echo "Hello, World!"
+    - name: "echo"
+      run: echo "Goodbye, World!"
+
+  pull-repository:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v2
+      with:
+        repository: 'peach-killer/TestWorkflowMigrate'
