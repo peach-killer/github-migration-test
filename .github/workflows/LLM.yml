@@ -1,0 +1,190 @@
+name: CI/CD Pipeline
+
+# 触发条件：代码推送到 main 分支或定时任务（每天凌晨2点）
+on:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: '0 2 * * *'  # UTC 时间的凌晨2点，根据需要调整时区
+
+# 全局环境变量
+env:
+  MVN_HOME: /usr/local/maven
+  DOCKER_IMAGE: myapp:latest
+
+jobs:
+  build_and_test:
+    name: 构建与测试
+    runs-on: ubuntu-latest
+
+    steps:
+      # 检出代码
+      - name: 检出代码
+        uses: actions/checkout@v3
+
+      # 初始化：设置构建开始时间
+      - name: 初始化
+        run: |
+          echo "BUILD_START_TIME=$(date '+%Y-%m-%d %H:%M:%S')" >> $GITHUB_ENV
+          echo "构建开始时间：${{ env.BUILD_START_TIME }}"
+
+      # 构建项目
+      - name: 使用 Maven 构建项目
+        run: ${{ env.MVN_HOME }}/bin/mvn clean compile
+
+      # 运行单元测试
+      - name: 运行单元测试
+        run: ${{ env.MVN_HOME }}/bin/mvn test
+
+      # 上传测试结果
+      - name: 上传测试结果
+        uses: actions/upload-artifact@v3
+        with:
+          name: test-results
+          path: target/surefire-reports/*.xml
+
+      # 运行 SonarQube 静态代码分析
+      - name: 运行 SonarQube 分析
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          ${{ env.MVN_HOME }}/bin/mvn sonar:sonar \
+            -Dsonar.projectKey=your_project_key \
+            -Dsonar.host.url=https://your-sonarqube-server.com \
+            -Dsonar.login=${{ secrets.SONAR_TOKEN }}
+
+      # 打包应用
+      - name: 打包应用
+        run: ${{ env.MVN_HOME }}/bin/mvn package
+
+      # 上传构建产物
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v3
+        with:
+          name: build-artifacts
+          path: target/*.jar
+
+  docker_build_push:
+    name: Docker 构建与推送
+    needs: build_and_test
+    runs-on: ubuntu-latest
+
+    steps:
+      # 检出代码
+      - name: 检出代码
+        uses: actions/checkout@v3
+
+      # 下载构建产物
+      - name: 下载构建产物
+        uses: actions/download-artifact@v3
+        with:
+          name: build-artifacts
+          path: target/
+
+      # 登录到 Docker Registry
+      - name: 登录 Docker Registry
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      # 构建 Docker 镜像
+      - name: 构建 Docker 镜像
+        run: docker build -t ${{ env.DOCKER_IMAGE }} .
+
+      # 推送 Docker 镜像到仓库
+      - name: 推送 Docker 镜像
+        run: docker push ${{ env.DOCKER_IMAGE }}
+
+  deploy:
+    name: 部署到生产环境
+    needs: docker_build_push
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://your-production-url.com  # 可选，指向生产环境的URL
+
+    steps:
+      # 检出代码
+      - name: 检出代码
+        uses: actions/checkout@v3
+
+      # 设置 Kubernetes 工具（kubectl）
+      - name: 设置 kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'latest'
+
+      # 部署到 Kubernetes 集群
+      - name: 部署到 Kubernetes
+        env:
+          KUBECONFIG: ${{ secrets.KUBECONFIG }}
+        run: kubectl apply -f k8s/deployment.yaml
+
+  integration_tests:
+    name: 集成测试
+    needs: deploy
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        test_type: [api, ui, performance]
+
+    steps:
+      # 检出代码
+      - name: 检出代码
+        uses: actions/checkout@v3
+
+      # 设置测试依赖（根据实际需求调整）
+      - name: 设置测试依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl  # 示例依赖
+
+      # 运行对应的测试脚本
+      - name: 运行 ${{ matrix.test_type }} 测试
+        run: ./scripts/run_${{ matrix.test_type }}_tests.sh
+
+      # 上传测试报告
+      - name: 上传 ${{ matrix.test_type }} 测试报告
+        uses: actions/upload-artifact@v3
+        with:
+          name: ${{ matrix.test_type }}-test-report
+          path: reports/**/*
+
+  notify:
+    name: 发送 Slack 通知
+    needs: [build_and_test, docker_build_push, deploy, integration_tests]
+    runs-on: ubuntu-latest
+    if: always()  # 无论前面步骤是否成功，都执行通知
+
+    steps:
+      - name: 发送 Slack 通知
+        uses: slackapi/slack-github-action@v1.23.0
+        with:
+          payload: |
+            {
+              "channel": "#build-notifications",
+              "attachments": [
+                {
+                  "color": "${{ job.status == 'success' && 'good' || 'danger' }}",
+                  "title": "构建通知",
+                  "text": "构建 `${{ github.workflow }}` #${{ github.run_number }} 结束状态: `${{ job.status }}`.\n查看详情: ${{ github.run_url }}"
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  cleanup:
+    name: 清理工作区
+    needs: notify
+    runs-on: ubuntu-latest
+    if: always()
+
+    steps:
+      - name: 清理工作区
+        run: |
+          echo "清理工作区..."
+          # GitHub Actions 在每个作业结束后会自动清理工作区
+          # 如果有额外的清理需求，可以在这里添加
